@@ -1,0 +1,102 @@
+import ast
+from pychord import Chord
+import ollama
+import simpleaudio as sa
+import numpy as np
+prompt_user = input('-->\n')
+# Define the prompt for Ollama
+prompt = (
+    "You are a chord progression generator. Your task is to produce a chord progression based on provided parameters. "
+    "Only output the progression as a Python list of chord names in the exact format, for example (the progression length may be as long as the user likes, between 2 and 8 chords.): ['Am7', 'Dm', 'Esus', 'Emaj']. "
+    "Apply sound music theory to ensure the chords harmonize well together, keeping the progression simple yet unique. "
+    "Do not include any extraneous commentary, symbols, or annotations—especially avoid unconventional chords such as those with '#11' or '#9', and do not use any parentheses (e.g., '(#9)')."
+)
+
+# Get    the chord progression from Ollama
+answer = ollama.chat(
+    model='llama3.2:3b', 
+    messages=[
+        {'role': 'system', 'content': prompt},
+        {'role': 'user', 'content': prompt_user}
+    ]
+
+)
+progression_str = answer['message']['content']
+print("Chord progression:", progression_str)
+
+# Safely convert the string to a Python list using ast.literal_eval
+progression = ast.literal_eval(progression_str)
+
+# === Piano-like ADSR Envelope Parameters ===
+# Piano notes are percussive: almost instantaneous attack, fast decay, very low sustain, and a long release.
+attack_time  = 0.01   # seconds (almost immediate attack)
+decay_time   = 0.2    # seconds (quick drop from peak)
+sustain_level = 0.3   # low sustain level
+release_time = 2.0    # seconds (long release tail)
+duration     = 3.0    # total chord duration
+
+sample_rate = 44100
+total_samples = int(sample_rate * duration)
+
+# Calculate sample counts for each ADSR phase
+attack_samples  = int(attack_time * sample_rate)
+decay_samples   = int(decay_time * sample_rate)
+release_samples = int(release_time * sample_rate)
+sustain_samples = total_samples - (attack_samples + decay_samples + release_samples)
+if sustain_samples < 0:
+    raise ValueError("Duration is too short for the given ADSR times.")
+
+# Create ADSR envelope (using linear segments for simplicity)
+attack_env  = np.linspace(0, 1, attack_samples, endpoint=False) if attack_samples > 0 else np.array([])
+decay_env   = np.linspace(1, sustain_level, decay_samples, endpoint=False) if decay_samples > 0 else np.array([])
+sustain_env = np.full(sustain_samples, sustain_level) if sustain_samples > 0 else np.array([])
+release_env = np.linspace(sustain_level, 0, release_samples, endpoint=True) if release_samples > 0 else np.array([])
+envelope = np.concatenate([attack_env, decay_env, sustain_env, release_env])
+
+# === Function to Play a Chord with a Piano-Like Sound ===
+def play_chord(notes):
+    # Mapping of note names to frequencies (for the 4th octave)
+    note_freqs = {
+        'C': 261.63, 'C#': 277.18, 'Db': 277.18, 'D': 293.66, 'D#': 311.13, 'Eb': 311.13,
+        'E': 329.63, 'F': 349.23, 'F#': 369.99, 'Gb': 369.99, 'G': 392.00, 'G#': 415.30,
+        'Ab': 415.30, 'A': 440.00, 'A#': 466.16, 'Bb': 466.16, 'B': 493.88
+    }
+    
+    # Generate a time array for the chord duration
+    t = np.linspace(0, duration, total_samples, False)
+    chord_wave = np.zeros_like(t)
+    
+    # Synthesize each note using additive synthesis with a piano-like harmonic mix:
+    # Fundamental: strongest
+    # 1st harmonic: moderately strong (2x frequency)
+    # 2nd harmonic: subtle (3x frequency)
+    for note in notes:
+        frequency = note_freqs.get(note)
+        if frequency:
+            # Fundamental tone
+            fundamental = np.sin(2 * np.pi * frequency * t)
+            # First harmonic (2x frequency) with reduced amplitude
+            harmonic1 = 0.5 * np.sin(2 * np.pi * frequency * 2 * t)
+            # Second harmonic (3x frequency) with even lower amplitude
+            harmonic2 = 0.25 * np.sin(2 * np.pi * frequency * 3 * t)
+            
+            # Combine harmonics and apply the piano-like envelope
+            note_wave = (fundamental + harmonic1 + harmonic2) * envelope
+            chord_wave += note_wave
+    
+    # Normalize to prevent clipping
+    chord_wave /= np.max(np.abs(chord_wave))
+    chord_wave = (chord_wave * 32767).astype(np.int16)
+    
+    # Play the chord sound
+    sa.play_buffer(chord_wave, 1, 2, sample_rate).wait_done()
+
+# === Iterate Over Each Chord in the Progression ===
+while True:
+    for chord_str in progression:
+        print("Playing chord:", chord_str)
+        c = Chord(chord_str)  # Create the chord object using pychord
+        print("Components:", c.components())  # Print the chord's components
+        
+        # Play the chord using its components
+        play_chord(c.components())
